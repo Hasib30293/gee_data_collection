@@ -39,11 +39,11 @@ gee_env/
 .env.local
 .env.*.local
 
-# Data
-data/
-*.tif
-*.tiff
-*.geotiff
+# Data (allow sentinel2_downloads, exclude others)
+# data/
+# *.tif
+# *.tiff
+# *.geotiff
 *.nc
 *.h5
 downloads/
