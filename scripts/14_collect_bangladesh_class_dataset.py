@@ -35,10 +35,15 @@ PROJECT_ID = "cedar-spring-496007-j8"
 DATASET = "COPERNICUS/S2_SR_HARMONIZED"
 START_DATE = "2023-01-01"
 END_DATE = "2024-12-31"
-CLOUD_COVER_MAX = 8
+CLOUD_COVER_MAX = int(os.getenv("BD_CLOUD_COVER_MAX", "15"))
 BANDS_RGB = ["B4", "B3", "B2"]
 
-CLASSES = ["city", "floods", "wildfire", "tree"]
+DEFAULT_CLASSES = ["city", "floods", "wildfire", "tree"]
+CLASSES_ENV = os.getenv("BD_CLASSES", "")
+if CLASSES_ENV.strip():
+    CLASSES = [name.strip().lower() for name in CLASSES_ENV.split(",") if name.strip()]
+else:
+    CLASSES = DEFAULT_CLASSES
 TOTAL_IMAGES = int(os.getenv("BD_TOTAL_IMAGES", "2000"))
 BASE_IMAGES_PER_CLASS = TOTAL_IMAGES // len(CLASSES)
 CLASS_TARGETS = {
@@ -46,15 +51,18 @@ CLASS_TARGETS = {
     for idx, class_name in enumerate(CLASSES)
 }
 
-# Sentinel-2 RGB is 10 m. A ~2.56 km chip at 512 px provides a closer view
-# while preserving native 10 m detail for crisp, clear samples.
-CHIP_SIZE_METERS = int(os.getenv("BD_CHIP_SIZE_METERS", "2560"))
-THUMBNAIL_PIXELS = int(os.getenv("BD_THUMBNAIL_PIXELS", "640"))
+# Sentinel-2 RGB is 10 m. A ~2.05 km chip at 768 px provides a close, detailed
+# view while preserving native 10 m detail for crisp samples.
+CHIP_SIZE_METERS = int(os.getenv("BD_CHIP_SIZE_METERS", "2048"))
+THUMBNAIL_PIXELS = int(os.getenv("BD_THUMBNAIL_PIXELS", "768"))
 DOWNLOAD_SLEEP_SECONDS = 0.15
 PANSHARP_STRENGTH = float(os.getenv("BD_PANSHARP_STRENGTH", "0.45"))
 VIS_MIN = int(os.getenv("BD_VIS_MIN", "0"))
 VIS_MAX = int(os.getenv("BD_VIS_MAX", "2500"))
 VIS_GAMMA = float(os.getenv("BD_VIS_GAMMA", "1.05"))
+MIN_COVERAGE = float(os.getenv("BD_MIN_COVERAGE", "0.90"))
+FLOOD_NDWI_MIN = float(os.getenv("BD_FLOOD_NDWI_MIN", "-0.38"))
+FLOOD_NDBI_MAX = float(os.getenv("BD_FLOOD_NDBI_MAX", "0.20"))
 MAX_ATTEMPTS_PER_CLASS = int(
     os.getenv("BD_MAX_ATTEMPTS_PER_CLASS", str(max(CLASS_TARGETS.values()) * 10))
 )
@@ -183,6 +191,18 @@ def image_with_scores(image: ee.Image) -> ee.Image:
     return image.addBands([ndvi, ndwi, ndbi, nbr])
 
 
+def coverage_fraction(image: ee.Image, aoi: ee.Geometry) -> float:
+    mask = image.select(BANDS_RGB[0]).mask()
+    stats = mask.reduceRegion(
+        reducer=ee.Reducer.mean(),
+        geometry=aoi,
+        scale=20,
+        maxPixels=1e8,
+        bestEffort=True,
+    ).getInfo()
+    return float(stats.get(BANDS_RGB[0]) or 0)
+
+
 def best_sentinel_image(aoi: ee.Geometry, class_name: str) -> ee.Image | None:
     start_date, end_date = CLASS_DATE_WINDOWS[class_name]
     collection = (
@@ -215,7 +235,7 @@ def class_quality(image: ee.Image, aoi: ee.Geometry, class_name: str) -> Tuple[b
     if class_name == "tree":
         ok = ndvi >= 0.42
     elif class_name == "floods":
-        ok = ndwi >= -0.22 and ndbi <= 0.10
+        ok = ndwi >= FLOOD_NDWI_MIN and ndbi <= FLOOD_NDBI_MAX
     elif class_name == "city":
         ok = ndbi >= -0.12 and ndvi <= 0.45
     elif class_name == "wildfire":
@@ -295,6 +315,9 @@ def collect_class(class_name: str) -> Dict:
         try:
             image = best_sentinel_image(aoi, class_name)
             if image is None:
+                continue
+
+            if coverage_fraction(image, aoi) < MIN_COVERAGE:
                 continue
 
             ok, scores = class_quality(image, aoi, class_name)
